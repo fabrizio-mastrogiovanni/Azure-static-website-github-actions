@@ -25,5 +25,5 @@ jobs:
               --account-name "labweek1" \
               --account-key "${{ secrets.AZURE_STORAGE_KEY }}" \
               --destination '$web' \
-              --source "." \
+              --source "Static-website" \
               --overwrite
