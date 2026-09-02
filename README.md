@@ -14,7 +14,7 @@ A public static website hosted on Azure Blob Storage — no virtual machines, no
 
 ## 🎥 Watch me build this
 
-👉 `[Loom walkthrough — link here]`
+👉 https://www.loom.com/share/09a10913c28643e2997294f8a72aaa5e
 
 ---
 
