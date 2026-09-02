@@ -1,192 +1,157 @@
-# Lab 01 — Static Website Hosting on Azure Blob Storage
+# ☁️ Azure Static Website + CI/CD Pipeline
 
-Deploying a public, serverless static site using **Azure Blob Storage** static website hosting — no virtual machines, no web server, no patching.
+**Azure Blob Storage · GitHub Actions · Automated Deployment**
+
+A public static website hosted on Azure Blob Storage — no virtual machines, no web server, no patching — starting from a manual deployment and ending with a fully automated pipeline where every push to `main` updates the live site.
 
 | | |
 |---|---|
 | **Cloud** | Microsoft Azure |
-| **Services** | Storage Account (Blob), Resource Group |
-| **Completed by** | `Fabrizio Mastrogiovanni` |
+| **Services** | Storage Account (Blob), Resource Group, Microsoft Entra ID |
+| **CI/CD** | GitHub Actions |
+| **Live site** | https://stlab01fabrizio.z13.web.core.windows.net/ |
+| **Author** | Fabrizio Mastrogiovanni |
+
+## 🎥 Watch me build this
+
+👉 `[Loom walkthrough — link here]`
 
 ---
 
-## 1. Objective
+## 📌 Overview
 
-Host a public-facing website without provisioning or managing a server.
+Hosting a website traditionally means a virtual machine (VM), a web server (NGINX/IIS), an operating system to patch, and a network to secure. Azure Blob Storage's **static website** feature removes all of it: you upload files, Azure serves them over HTTPS.
 
-Traditionally this requires a virtual machine (VM), a web server (NGINX/IIS), an operating system to patch, and a network to secure. Azure Blob Storage's **static website** feature removes all of that: you upload files, Azure serves them over HTTPS. This is a **PaaS (Platform as a Service)** pattern — you own the content, Microsoft owns the infrastructure underneath it.
+This project goes one step further and removes the manual upload too.
 
-**What this lab demonstrates:**
-- Resource organization using Resource Groups
+**What it demonstrates:**
+
+- Resource organization and lifecycle control with Resource Groups
 - Storage Account provisioning and redundancy selection
 - Static website hosting and the auto-provisioned `$web` container
-- Public endpoint validation
-- Cost hygiene via full resource cleanup
+- Workload identity authentication — no long-lived secrets in the repository
+- Push-to-deploy automation with GitHub Actions
 
 ---
 
-## 2. Architecture
+## 🏗️ Architecture
 
-### Request flow
+### Deployment flow
 
 ```mermaid
 flowchart LR
-    U["User<br/>(Browser)"] -->|"HTTPS GET /"| EP["Primary Endpoint<br/>https://stlab01name.z13.web.core.windows.net"]
-    EP --> SA["Azure Storage Account<br/>stlab01name<br/>Standard / LRS"]
-    SA --> WEB["$web container<br/>(auto-created, public read)"]
-    WEB --> IDX["index.html<br/>(index document)"]
-    WEB --> ERR["404.html<br/>(error document)"]
+    DEV["Developer<br/>git push origin main"] --> GH["GitHub Repository"]
+    GH -->|"triggers"| GA["GitHub Actions Runner<br/>ubuntu-latest"]
+    GA -->|"OIDC token"| ENTRA["Microsoft Entra ID<br/>Federated credential"]
+    ENTRA -->|"short-lived access token"| GA
+    GA -->|"az storage blob upload-batch"| WEB["$web container"]
+    WEB --> EP["Public endpoint<br/>web.core.windows.net"]
+    EP --> USER["Visitor<br/>(Browser)"]
 
-    subgraph AZ["Azure — Resource Group: rg-lab01-name — Region: East US"]
-        EP
-        SA
+    subgraph AZURE["Azure — rg-lab01-fabrizio — East US"]
+        ENTRA
         WEB
-        IDX
-        ERR
+        EP
     end
 ```
 
-The trust boundary sits at the endpoint: everything inside the `$web` container is anonymously readable from the public internet. Nothing else in the storage account is exposed by enabling this feature — other containers keep their own access level.
+### Repository structure
+
+```
+azure-static-website-cicd
+│
+├── Static-website/
+│     ├── index.html          # Site content
+│     └── profile.jpg         # Profile photo
+│
+├── .github/workflows/
+│     └── deploy.yml          # CI/CD workflow
+│
+└── README.md
+```
+
+Pushing to `main` triggers `deploy.yml`, which uploads everything in `Static-website/` to the Azure `$web` container.
 
 ### Resource hierarchy
 
 ```mermaid
 flowchart TD
-    SUB["Azure Subscription"] --> RG["Resource Group<br/>rg-lab01-name"]
-    RG --> SA["Storage Account<br/>stlab01name"]
+    SUB["Azure Subscription"] --> RG["Resource Group<br/>rg-lab01-fabrizio"]
+    RG --> SA["Storage Account<br/>stlab01fabrizio"]
     SA --> BLOB["Blob Service"]
-    BLOB --> WEB["$web<br/>(static website)"]
+    BLOB --> WEB["$web<br/>(public — static website)"]
     BLOB --> OTHER["Other containers<br/>(private by default)"]
 ```
 
-Deleting the Resource Group deletes everything beneath it — this is the cleanup mechanism in Section 8.
+The trust boundary sits at the endpoint: everything inside `$web` is anonymously readable from the internet. Enabling static website hosting does **not** change access on any other container.
 
 ---
 
-## 3. Prerequisites
+## ⚙️ Tech stack
 
-- [ ] Active Azure Subscription (Free Tier is sufficient)
-- [ ] A text editor (VS Code, Notepad, TextEdit)
-- [ ] *(Optional)* [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) if you want to follow the CLI path in Section 6
+- Microsoft Azure Blob Storage (static website hosting)
+- Microsoft Entra ID (service principal + federated credentials)
+- Azure CLI
+- GitHub Actions
+- HTML / CSS
 
 ---
 
-## 4. Naming convention
+## 🚀 Part 1 — Manual deployment
 
-Consistent names make resources searchable, scriptable, and easy to clean up. Replace `[yourname]` throughout.
+The baseline environment, built by hand before any automation existed.
+
+### Naming convention
 
 | Resource | Value | Constraints |
 |---|---|---|
-| Resource Group | `rg-lab01-[yourname]` | — |
-| Region | `East US` | Keep all resources in one region |
-| Storage Account | `stlab01[yourname]` | **Globally unique**, 3–24 chars, lowercase letters and numbers only |
+| Resource Group | `rg-lab01-fabrizio` | — |
+| Region | `East US` | Keep everything in one region |
+| Storage Account | `stlab01fabrizio` | **Globally unique**, 3–24 chars, lowercase alphanumeric only |
 
-> Storage account names are part of a public DNS name (`<name>.blob.core.windows.net`), which is why they must be unique across all of Azure — not just your subscription.
+> Storage account names resolve to public DNS (`<name>.blob.core.windows.net`), which is why they must be unique across all of Azure — not just your subscription.
 
----
+### Steps
 
-## 5. Deployment — Azure Portal
+**1. Create the Resource Group**
+Azure Portal → **Resource groups** → **+ Create** → name `rg-lab01-fabrizio`, region `(US) East US`.
 
-### Phase 1 — Create the Resource Group
+A Resource Group is a lifecycle boundary, not just a folder. One delete removes the entire lab footprint.
 
-1. Sign in to the [Azure Portal](https://portal.azure.com).
-2. Search **Resource groups** → **+ Create**.
-3. **Subscription:** your subscription
-   **Resource group:** `rg-lab01-[yourname]`
-   **Region:** `(US) East US`
-4. **Review + create** → **Create**.
+**2. Create the Storage Account**
+**Storage accounts** → **+ Create**:
 
-A Resource Group is a logical container and a lifecycle boundary. Everything in this lab goes inside it so a single delete removes all of it.
+| Setting | Value | Why |
+|---|---|---|
+| Resource group | `rg-lab01-fabrizio` | Keeps lifecycle contained |
+| Performance | `Standard` | Premium is unnecessary for static files |
+| Redundancy | `Locally-redundant storage (LRS)` | 3 copies in one datacenter — cheapest option |
 
-### Phase 2 — Create the Storage Account
+> **Redundancy note:** LRS survives a drive or rack failure, not a datacenter outage. Production would use ZRS or GRS. LRS is chosen here purely for cost.
 
-1. Search **Storage accounts** → **+ Create**.
-2. Configure the **Basics** tab:
+**3. Enable static website hosting**
+Storage Account → **Data management → Static website** → **Enabled**
+Index document: `index.html` · Error document: `404.html` → **Save**
 
-   | Setting | Value | Why |
-   |---|---|---|
-   | Resource group | `rg-lab01-[yourname]` | Keeps lifecycle contained |
-   | Storage account name | `stlab01[yourname]` | Lowercase alphanumeric only |
-   | Region | `(US) East US` | Match the Resource Group |
-   | Performance | `Standard` | General-purpose, HDD-backed; Premium is unnecessary here |
-   | Redundancy | `Locally-redundant storage (LRS)` | 3 copies in one datacenter — cheapest, adequate for a lab |
+Azure creates the `$web` container automatically and displays the **Primary endpoint**. That URL is the public address of the site.
 
-3. **Review + create** → wait for validation → **Create**.
-4. When deployment completes (~30s), click **Go to resource**.
+**4. Upload and validate**
+**Containers → `$web` → Upload** → select `index.html` → open the Primary endpoint in a browser.
 
-> **Redundancy note:** LRS survives a rack or drive failure, not a datacenter outage. Production sites would use ZRS (zone-redundant) or GRS (geo-redundant). LRS is chosen here purely for cost.
+The site is live. Every future change, however, would mean uploading files by hand — which is exactly what Part 3 fixes.
 
-### Phase 3 — Enable static website hosting
-
-1. In the Storage Account menu, under **Data management**, select **Static website**.
-2. Toggle **Static website** to **Enabled**.
-3. **Index document name:** `index.html`
-4. **Error document path:** `404.html`
-5. **Save**.
-
-Azure now displays a **Primary endpoint** — for example
-`https://stlab01[yourname].z13.web.core.windows.net/`
-
-**Copy this URL.** It is the public address of your site. Saving also auto-creates the `$web` container.
-
-### Phase 4 — Create the site file
-
-Save the following as `index.html` (exact lowercase filename):
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>My First Cloud Site</title>
-    <style>
-        body { font-family: sans-serif; text-align: center; margin-top: 50px; background-color: #f0f0f0; }
-        h1 { color: #0078d4; }
-    </style>
-</head>
-<body>
-    <h1>Hello from the Cloud!</h1>
-    <p>This site is hosted on Azure Blob Storage.</p>
-    <p>Deployed by: [Your Name]</p>
-</body>
-</html>
-```
-
-### Phase 5 — Upload content
-
-1. Storage Account menu → **Containers** (under **Data storage**).
-2. Open the `$web` container.
-3. **Upload** → select `index.html` → **Upload**.
-
-### Phase 6 — Validate
-
-1. Open a new browser tab.
-2. Paste the **Primary endpoint** URL from Phase 3.
-3. You should see **"Hello from the Cloud!"**
-
-Deployment complete.
-
----
-
-## 6. Deployment — Azure CLI (equivalent path)
-
-Same result, reproducible and scriptable. Replace `yourname` before running.
+### CLI equivalent
 
 ```bash
-# Variables
-NAME="yourname"
+NAME="fabrizio"
 RG="rg-lab01-$NAME"
 STORAGE="stlab01$NAME"
 LOCATION="eastus"
 
-# Sign in
 az login
 
-# 1. Resource Group
-az group create \
-  --name "$RG" \
-  --location "$LOCATION"
+az group create --name "$RG" --location "$LOCATION"
 
-# 2. Storage Account (Standard, LRS)
 az storage account create \
   --name "$STORAGE" \
   --resource-group "$RG" \
@@ -194,123 +159,144 @@ az storage account create \
   --sku Standard_LRS \
   --kind StorageV2
 
-# 3. Enable static website hosting (creates $web automatically)
 az storage blob service-properties update \
   --account-name "$STORAGE" \
   --static-website \
   --index-document index.html \
   --404-document 404.html
 
-# 4. Upload site content
-az storage blob upload \
-  --account-name "$STORAGE" \
-  --container-name '$web' \
-  --name index.html \
-  --file ./index.html \
-  --auth-mode login \
-  --overwrite
-
-# 5. Retrieve the public endpoint
 az storage account show \
   --name "$STORAGE" \
   --resource-group "$RG" \
-  --query "primaryEndpoints.web" \
-  --output tsv
+  --query "primaryEndpoints.web" -o tsv
 ```
 
-> `--auth-mode login` uses your Entra ID (formerly Azure AD) identity instead of an account key. Prefer this over key-based auth — see Section 7.
-
 ---
 
-## 7. Security considerations
+## 🔐 Part 2 — Authorization setup
 
-The lab works as written, but here is what a production deployment would change:
+GitHub Actions runs on a machine that has never seen your Azure account. It needs an identity.
 
-| Consideration | Lab state | Production guidance |
-|---|---|---|
-| **Public exposure** | `$web` is anonymously readable by anyone with the URL | Expected for a public site — but confirm no other container is set to public access |
-| **Authentication for uploads** | Portal upload uses your signed-in identity | Use Entra ID / RBAC (`Storage Blob Data Contributor`) and disable shared key access: `--allow-shared-key-access false` |
-| **Transport** | HTTPS enforced by default on the endpoint | Keep "Secure transfer required" enabled; never disable it |
-| **Custom domain + TLS** | Uses the `*.web.core.windows.net` endpoint | Front with Azure CDN or Front Door for a custom domain, managed TLS certificate, and WAF |
-| **Content integrity** | Manual upload | Deploy from CI/CD (GitHub Actions) so the site is reproducible from source |
-| **Logging** | Not enabled | Enable Storage Analytics / diagnostic settings to Log Analytics for read patterns and anomalies |
-| **Cost exposure** | LRS, deleted after lab | Set a budget alert on the subscription; egress bandwidth is the main variable cost |
+This project uses **OpenID Connect (OIDC) federated credentials**: GitHub mints a short-lived token for each workflow run, and Azure trusts it only when it comes from this repository on this branch. No client secret, no storage account key, nothing long-lived stored in GitHub.
 
-> **Key takeaway:** enabling static website hosting makes *only* the `$web` container public. It does not change access on any other container. Verify before assuming.
-
----
-
-## 8. Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `404 - The requested content does not exist.` | Filename case mismatch | Azure is case-sensitive. The file must be exactly `index.html` — not `Index.html` or `index.html.txt` |
-| `404` with a correct filename | Uploaded to the wrong container | Content must be in `$web`, not `documents`, `data`, or any other container |
-| `Storage account name is already taken` | Names are globally unique across Azure | Append digits: `stlab01yourname99` |
-| `Static website` blade missing | Wrong account kind | Requires `StorageV2` (general-purpose v2) or BlockBlobStorage — legacy v1 does not support it |
-| Old content still served | Browser or CDN cache | Hard refresh (`Ctrl+Shift+R` / `Cmd+Shift+R`) or open in a private window |
-| Endpoint returns nothing | Using the *blob* endpoint, not the *web* endpoint | The correct URL contains `.web.core.windows.net`, not `.blob.core.windows.net` |
-
----
-
-## 9. Cleanup
-
-Always tear down lab resources. Deleting the Resource Group removes every resource inside it.
-
-**Portal:** Resource groups → `rg-lab01-[yourname]` → **Delete resource group** → type the name to confirm → **Delete**.
-
-**CLI:**
+### One-time setup (Azure Cloud Shell)
 
 ```bash
-az group delete --name "rg-lab01-$NAME" --yes --no-wait
+RG="rg-lab01-fabrizio"
+SA="stlab01fabrizio"
+APP="gh-actions-azure-static-site"
+REPO="YOUR-GITHUB-USER/YOUR-REPO"
+SUB=$(az account show --query id -o tsv)
+
+# 1. App registration + service principal
+APP_ID=$(az ad app create --display-name "$APP" --query appId -o tsv)
+az ad sp create --id "$APP_ID"
+
+# 2. Trust GitHub's token — only this repo, only the main branch
+az ad app federated-credential create --id "$APP_ID" --parameters "{
+  \"name\": \"gh-main\",
+  \"issuer\": \"https://token.actions.githubusercontent.com\",
+  \"subject\": \"repo:$REPO:ref:refs/heads/main\",
+  \"audiences\": [\"api://AzureADTokenExchange\"]
+}"
+
+# 3. Least-privilege role, scoped to this storage account only
+az role assignment create \
+  --assignee "$APP_ID" \
+  --role "Storage Blob Data Contributor" \
+  --scope "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$SA"
+
+# 4. Values for GitHub
+echo "AZURE_CLIENT_ID:       $APP_ID"
+echo "AZURE_TENANT_ID:       $(az account show --query tenantId -o tsv)"
+echo "AZURE_SUBSCRIPTION_ID: $SUB"
 ```
 
-Verify it is gone:
+Add those three under **Settings → Secrets and variables → Actions → Variables**. They are identifiers, not credentials, so they belong in Variables rather than Secrets.
+
+---
+
+## 🤖 Part 3 — CI/CD pipeline
+
+**Trigger:** push to `main`, or a manual run from the Actions tab
+
+The full workflow lives in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
+
+**What each step does:**
+
+1. **Checkout** — the runner starts empty; this pulls the repo onto it
+2. **Azure Login** — exchanges GitHub's OIDC token for an Azure access token
+3. **Upload** — syncs `Static-website/` into `$web`, overwriting changed files
+4. **Output** — prints the live URL to the run summary
+
+`--auth-mode login` uses the federated identity from step 2 rather than an account key.
+
+> `SOURCE_DIR` must match your actual folder name exactly. If your files live in `src/`, change it there.
+
+---
+
+## 🧪 Part 4 — Testing the pipeline (video demo)
+
+The proof that automation works is a change made in GitHub appearing on the live site without ever opening the Azure Portal.
+
+### The demo change
+
+Add this to `Static-website/index.html`, just above the `<footer>` tag:
+
+```html
+<div class="deploy-badge">
+  <span class="dot"></span>
+  Deployed by GitHub Actions
+</div>
+```
+
+### Deploy it
 
 ```bash
-az group exists --name "rg-lab01-$NAME"   # should return: false
+git add .
+git commit -m "Add deploy badge"
+git push
 ```
 
----
+**What happens next:**
 
-## 10. Repository structure
+1. GitHub Actions starts the workflow automatically
+2. The runner authenticates to Azure via OIDC
+3. Files upload to `$web`
+4. Refreshing the live site shows the change — no Portal, no manual upload
 
+```mermaid
+sequenceDiagram
+    participant Dev as Developer
+    participant GH as GitHub
+    participant Runner as Actions Runner
+    participant Entra as Entra ID
+    participant Blob as $web container
+
+    Dev->>GH: git push origin main
+    GH->>Runner: Start workflow
+    Runner->>Entra: Present OIDC token
+    Entra-->>Runner: Access token (short-lived)
+    Runner->>Blob: upload-batch Static-website/
+    Blob-->>Dev: Live site updated
 ```
-.
-├── README.md           # This document
-├── src/
-│   ├── index.html      # Site content
-│   └── 404.html        # Error page
-└── scripts/
-    ├── deploy.sh       # CLI deployment (Section 6)
-    └── cleanup.sh      # Teardown (Section 9)
-```
+
+> **Recording tips:** hard refresh (`Cmd+Shift+R` / `Ctrl+Shift+R`) or use a private window — caching will otherwise show the old page. And wait for the Actions run to go green before refreshing; the job takes 30–60 seconds.
 
 ---
 
-## 11. What I learned
+## 👨🏻‍💻 Author
 
-- **Resource Groups are a lifecycle boundary**, not just a folder — one delete removes the entire lab footprint, which is the simplest cost control available.
-- **Serverless is not "no infrastructure," it's "someone else's infrastructure."** The trade-off is losing server-level control in exchange for zero patching and zero capacity planning.
-- **Storage account names are globally unique because they resolve to public DNS**, which explains the naming constraints rather than making them feel arbitrary.
-- **Enabling static website hosting scopes public access to `$web` only** — a useful default that limits blast radius.
-- **Redundancy is a deliberate cost/availability decision**, not a checkbox: LRS protects against hardware failure, ZRS/GRS against zone or regional failure.
+**Fabrizio Mastrogiovanni** — Cloud Engineer
 
----
-
-## 12. Next steps
-
-- [ ] Add a custom domain with Azure CDN or Front Door and a managed TLS certificate
-- [ ] Automate deployment with GitHub Actions on push to `main`
-- [ ] Disable shared key access and deploy using a federated identity (OIDC) — no secrets in the repo
-- [ ] Enable diagnostic logging to Log Analytics and build a basic access dashboard
-- [ ] Add a budget alert on the subscription
+- GitHub: https://github.com/fabrizio-mastrogiovanni
+- LinkedIn: https://www.linkedin.com/in/fabrizio-mastrogiovanni-499335276/
 
 ---
 
-## References
+## 📚 References
 
 - [Static website hosting in Azure Storage](https://learn.microsoft.com/azure/storage/blobs/storage-blob-static-website)
-- [Host a static website — how-to](https://learn.microsoft.com/azure/storage/blobs/storage-blob-static-website-how-to)
-- [Azure Storage redundancy](https://learn.microsoft.com/azure/storage/common/storage-redundancy)
-- [Authorize access to blobs with Entra ID](https://learn.microsoft.com/azure/storage/blobs/authorize-access-azure-active-directory)
+- [Configure a federated identity credential](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-create-trust)
+- [azure/login GitHub Action](https://github.com/Azure/login)
+- [Authorize blob access with Entra ID](https://learn.microsoft.com/azure/storage/blobs/authorize-access-azure-active-directory)
