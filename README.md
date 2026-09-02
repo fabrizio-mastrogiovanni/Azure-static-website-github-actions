@@ -250,6 +250,44 @@ Add this to `Static-website/index.html`, just above the `<footer>` tag:
 </div>
 ```
 
+And this inside the `<style>` block, just above the `footer {` rule:
+
+```css
+.deploy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 28px;
+  padding: 8px 14px;
+  background: #eaf4fd;
+  border: 1px solid #b8ddf7;
+  border-radius: 999px;
+  color: #0a5a9e;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.deploy-badge .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22,163,74,0.18);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(22,163,74,0.18); }
+  50%      { box-shadow: 0 0 0 7px rgba(22,163,74,0.05); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deploy-badge .dot { animation: none; }
+}
+```
+
+Without the CSS the badge still renders, just as plain text — the styles are what turn it into the pill with the pulsing status dot.
+
 ### Deploy it
 
 ```bash
