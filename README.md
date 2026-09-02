@@ -9,7 +9,7 @@ A public static website hosted on Azure Blob Storage — no virtual machines, no
 | **Cloud** | Microsoft Azure |
 | **Services** | Storage Account (Blob), Resource Group, Microsoft Entra ID |
 | **CI/CD** | GitHub Actions |
-| **Live site** | https://stlab01fabrizio.z13.web.core.windows.net/ |
+| **Live site** | https://labweek1.z13.web.core.windows.net/ |
 | **Author** | Fabrizio Mastrogiovanni |
 
 ## 🎥 Watch me build this
