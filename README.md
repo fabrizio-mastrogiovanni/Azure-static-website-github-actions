@@ -29,7 +29,7 @@ This project goes one step further and removes the manual upload too.
 - Resource organization and lifecycle control with Resource Groups
 - Storage Account provisioning and redundancy selection
 - Static website hosting and the auto-provisioned `$web` container
-- Workload identity authentication — no long-lived secrets in the repository
+- Service principal authentication for a non-human identity
 - Push-to-deploy automation with GitHub Actions
 
 ---
@@ -42,14 +42,14 @@ This project goes one step further and removes the manual upload too.
 flowchart LR
     DEV["Developer<br/>git push origin main"] --> GH["GitHub Repository"]
     GH -->|"triggers"| GA["GitHub Actions Runner<br/>ubuntu-latest"]
-    GA -->|"OIDC token"| ENTRA["Microsoft Entra ID<br/>Federated credential"]
-    ENTRA -->|"short-lived access token"| GA
+    GA -->|"AZURE_CREDENTIALS"| SP["Service Principal<br/>Microsoft Entra ID"]
+    SP -->|"authenticated session"| GA
     GA -->|"az storage blob upload-batch"| WEB["$web container"]
     WEB --> EP["Public endpoint<br/>web.core.windows.net"]
     EP --> USER["Visitor<br/>(Browser)"]
 
-    subgraph AZURE["Azure — rg-lab01-fabrizio — East US"]
-        ENTRA
+    subgraph AZURE["Azure — resource-group-lab-1 — East US"]
+        SP
         WEB
         EP
     end
@@ -58,7 +58,7 @@ flowchart LR
 ### Repository structure
 
 ```
-azure-static-website-cicd
+Azure-static-website-github-actions
 │
 ├── Static-website/
 │     ├── index.html          # Site content
@@ -76,8 +76,8 @@ Pushing to `main` triggers `deploy.yml`, which uploads everything in `Static-web
 
 ```mermaid
 flowchart TD
-    SUB["Azure Subscription"] --> RG["Resource Group<br/>rg-lab01-fabrizio"]
-    RG --> SA["Storage Account<br/>stlab01fabrizio"]
+    SUB["Azure Subscription"] --> RG["Resource Group<br/>resource-group-lab-1"]
+    RG --> SA["Storage Account<br/>labweek1"]
     SA --> BLOB["Blob Service"]
     BLOB --> WEB["$web<br/>(public — static website)"]
     BLOB --> OTHER["Other containers<br/>(private by default)"]
@@ -90,9 +90,9 @@ The trust boundary sits at the endpoint: everything inside `$web` is anonymously
 ## ⚙️ Tech stack
 
 - Microsoft Azure Blob Storage (static website hosting)
-- Microsoft Entra ID (service principal + federated credentials)
+- Microsoft Entra ID (service principal)
 - Azure CLI
-- GitHub Actions
+- GitHub Actions + GitHub Secrets
 - HTML / CSS
 
 ---
@@ -105,16 +105,16 @@ The baseline environment, built by hand before any automation existed.
 
 | Resource | Value | Constraints |
 |---|---|---|
-| Resource Group | `rg-lab01-fabrizio` | — |
+| Resource Group | `resource-group-lab-1` | — |
 | Region | `East US` | Keep everything in one region |
-| Storage Account | `stlab01fabrizio` | **Globally unique**, 3–24 chars, lowercase alphanumeric only |
+| Storage Account | `labweek1` | **Globally unique**, 3–24 chars, lowercase alphanumeric only |
 
 > Storage account names resolve to public DNS (`<name>.blob.core.windows.net`), which is why they must be unique across all of Azure — not just your subscription.
 
 ### Steps
 
 **1. Create the Resource Group**
-Azure Portal → **Resource groups** → **+ Create** → name `rg-lab01-fabrizio`, region `(US) East US`.
+Azure Portal → **Resource groups** → **+ Create** → name `resource-group-lab-1`, region `(US) East US`.
 
 A Resource Group is a lifecycle boundary, not just a folder. One delete removes the entire lab footprint.
 
@@ -123,7 +123,7 @@ A Resource Group is a lifecycle boundary, not just a folder. One delete removes 
 
 | Setting | Value | Why |
 |---|---|---|
-| Resource group | `rg-lab01-fabrizio` | Keeps lifecycle contained |
+| Resource group | `resource-group-lab-1` | Keeps lifecycle contained |
 | Performance | `Standard` | Premium is unnecessary for static files |
 | Redundancy | `Locally-redundant storage (LRS)` | 3 copies in one datacenter — cheapest option |
 
@@ -143,9 +143,8 @@ The site is live. Every future change, however, would mean uploading files by ha
 ### CLI equivalent
 
 ```bash
-NAME="fabrizio"
-RG="rg-lab01-$NAME"
-STORAGE="stlab01$NAME"
+RG="resource-group-lab-1"
+STORAGE="labweek1"
 LOCATION="eastus"
 
 az login
@@ -175,63 +174,67 @@ az storage account show \
 
 ## 🔐 Part 2 — Authorization setup
 
-GitHub Actions runs on a machine that has never seen your Azure account. It needs an identity.
+GitHub Actions runs on a machine that has never seen your Azure account. It needs an identity of its own.
 
-This project uses **OpenID Connect (OIDC) federated credentials**: GitHub mints a short-lived token for each workflow run, and Azure trusts it only when it comes from this repository on this branch. No client secret, no storage account key, nothing long-lived stored in GitHub.
+This project uses a **service principal** — a non-human identity in Microsoft Entra ID that the pipeline logs in as. Its credentials are stored as encrypted GitHub Actions secrets, never committed to the repository.
 
-### One-time setup (Azure Cloud Shell)
+### Secrets used
+
+| Secret | What it is | Where it comes from |
+|---|---|---|
+| `AZURE_CREDENTIALS` | Service principal JSON used by `azure/login` | Generated with the CLI command below |
+| `AZURE_STORAGE_KEY` | Storage account access key used by the upload step | Storage account → **Security + networking → Access keys** |
+
+### Create the service principal
 
 ```bash
-RG="rg-lab01-fabrizio"
-SA="stlab01fabrizio"
-APP="gh-actions-azure-static-site"
-REPO="YOUR-GITHUB-USER/YOUR-REPO"
+RG="resource-group-lab-1"
 SUB=$(az account show --query id -o tsv)
 
-# 1. App registration + service principal
-APP_ID=$(az ad app create --display-name "$APP" --query appId -o tsv)
-az ad sp create --id "$APP_ID"
-
-# 2. Trust GitHub's token — only this repo, only the main branch
-az ad app federated-credential create --id "$APP_ID" --parameters "{
-  \"name\": \"gh-main\",
-  \"issuer\": \"https://token.actions.githubusercontent.com\",
-  \"subject\": \"repo:$REPO:ref:refs/heads/main\",
-  \"audiences\": [\"api://AzureADTokenExchange\"]
-}"
-
-# 3. Least-privilege role, scoped to this storage account only
-az role assignment create \
-  --assignee "$APP_ID" \
+az ad sp create-for-rbac \
+  --name "gh-actions-azure-static-site" \
   --role "Storage Blob Data Contributor" \
-  --scope "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$SA"
-
-# 4. Values for GitHub
-echo "AZURE_CLIENT_ID:       $APP_ID"
-echo "AZURE_TENANT_ID:       $(az account show --query tenantId -o tsv)"
-echo "AZURE_SUBSCRIPTION_ID: $SUB"
+  --scopes "/subscriptions/$SUB/resourceGroups/$RG" \
+  --sdk-auth
 ```
 
-Add those three under **Settings → Secrets and variables → Actions → Variables**. They are identifiers, not credentials, so they belong in Variables rather than Secrets.
+Copy the full JSON output into **Settings → Secrets and variables → Actions → New repository secret** as `AZURE_CREDENTIALS`.
+
+Then grab the storage key from the Portal and add it as `AZURE_STORAGE_KEY`.
+
+The service principal appears afterwards under **Microsoft Entra ID → App registrations**.
+
+### What I'd improve next
+
+Both secrets here are **long-lived credentials**. The storage key in particular grants full control over the entire storage account, never expires on its own, and has to be rotated manually.
+
+The stronger pattern is **OpenID Connect (OIDC) federated credentials**: Azure trusts a short-lived token that GitHub mints per workflow run, bound to this repository and this branch. Nothing is stored in GitHub at all, and a leaked token is useless anywhere else.
+
+That's the upgrade path for this project, and the reason it matters:
+
+| | Storage account key | OIDC federated identity |
+|---|---|---|
+| Lifetime | Until manually rotated | Minutes, per workflow run |
+| Scope | Full control of the storage account | One role, one scope |
+| Stored in GitHub | Yes | Nothing stored |
+| If leaked | Full data-plane access | Useless outside this repo and branch |
 
 ---
 
 ## 🤖 Part 3 — CI/CD pipeline
 
-**Trigger:** push to `main`, or a manual run from the Actions tab
+**Trigger:** push to `main`
 
 The full workflow lives in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
 
 **What each step does:**
 
 1. **Checkout** — the runner starts empty; this pulls the repo onto it
-2. **Azure Login** — exchanges GitHub's OIDC token for an Azure access token
-3. **Upload** — syncs `Static-website/` into `$web`, overwriting changed files
-4. **Output** — prints the live URL to the run summary
+2. **Azure Login** — signs in as the service principal using `AZURE_CREDENTIALS`
+3. **Upload** — syncs `Static-website/` into `$web` using `AZURE_STORAGE_KEY`, overwriting changed files
+4. **Done** — the live site reflects the commit
 
-`--auth-mode login` uses the federated identity from step 2 rather than an account key.
-
-> `SOURCE_DIR` must match your actual folder name exactly. If your files live in `src/`, change it there.
+> `--source` must match your actual folder name exactly. Pointing it at the repo root uploads `.git`, `.github`, and the README to your public site — a mistake worth avoiding.
 
 ---
 
@@ -299,7 +302,7 @@ git push
 **What happens next:**
 
 1. GitHub Actions starts the workflow automatically
-2. The runner authenticates to Azure via OIDC
+2. The runner signs in to Azure as the service principal
 3. Files upload to `$web`
 4. Refreshing the live site shows the change — no Portal, no manual upload
 
@@ -308,13 +311,13 @@ sequenceDiagram
     participant Dev as Developer
     participant GH as GitHub
     participant Runner as Actions Runner
-    participant Entra as Entra ID
+    participant SP as Service Principal
     participant Blob as $web container
 
     Dev->>GH: git push origin main
     GH->>Runner: Start workflow
-    Runner->>Entra: Present OIDC token
-    Entra-->>Runner: Access token (short-lived)
+    Runner->>SP: Log in with AZURE_CREDENTIALS
+    SP-->>Runner: Authenticated session
     Runner->>Blob: upload-batch Static-website/
     Blob-->>Dev: Live site updated
 ```
@@ -335,6 +338,7 @@ sequenceDiagram
 ## 📚 References
 
 - [Static website hosting in Azure Storage](https://learn.microsoft.com/azure/storage/blobs/storage-blob-static-website)
-- [Configure a federated identity credential](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-create-trust)
+- [Create an Azure service principal with the CLI](https://learn.microsoft.com/cli/azure/azure-cli-sp-tutorial-1)
 - [azure/login GitHub Action](https://github.com/Azure/login)
-- [Authorize blob access with Entra ID](https://learn.microsoft.com/azure/storage/blobs/authorize-access-azure-active-directory)
+- [Using secrets in GitHub Actions](https://docs.github.com/actions/security-guides/using-secrets-in-github-actions)
+- [Configure a federated identity credential](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-create-trust)
